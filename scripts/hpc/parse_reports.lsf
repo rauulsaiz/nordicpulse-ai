@@ -11,11 +11,12 @@
 #
 # ---------------------------------------------------------------- LSF options
 #BSUB -J parse_reports
-# TODO: check the GPU queue before submitting. gpuv100 (V100) and gpua100 (A100) are
-#       the GPU queues documented at https://www.hpc.dtu.dk/?page_id=2129. Confirm they
-#       exist and how busy they are with `bqueues` and `nodestat -G gpuv100`
-#       (or `nodestat -G gpua100`), and switch queue if one is much less loaded.
-#BSUB -q gpuv100
+# GPU queue. DTU documents gpua100 (A100, sm_80) and gpuv100 (V100, sm_70) at
+# https://www.hpc.dtu.dk/?page_id=2129; the A100 queue is the default here. The cu126
+# PyTorch build from setup_env.sh supports both, so gpuv100 also works: override it with
+#     bsub -q gpuv100 < scripts/hpc/parse_reports.lsf
+# TODO: confirm the queue is available to you with `bqueues` / `nodestat -G gpua100`.
+#BSUB -q gpua100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 8
 #BSUB -R "span[hosts=1]"
@@ -45,15 +46,19 @@ echo "=== Job ${LSB_JOBID:-?} on $(hostname) at $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=== Working directory: $PWD"
 echo "=== Cores: ${LSB_DJOB_NUMPROC:-?}"
 echo "=== Venv: $VENV_DIR | HF_HOME: $HF_HOME | TORCH_HOME: $TORCH_HOME"
-echo "=== nvidia-smi"
-nvidia-smi || echo "WARNING: nvidia-smi failed: no GPU visible to this job" >&2
+echo
+
+# Fail fast if PyTorch cannot actually run on this GPU (prints nvidia-smi, torch build,
+# arch list and capability). Without this, a torch build lacking kernels for the GPU
+# makes Docling fail on every page for hours.
+if ! VENV_DIR="$VENV_DIR" bash scripts/hpc/check_gpu.sh; then
+    echo "ERROR: GPU check failed on $(hostname) (queue ${LSB_QUEUE:-?}); not starting the" >&2
+    echo "       parser. See the check output above and 'Troubleshooting' in docs/hpc.md." >&2
+    exit 1
+fi
 echo
 
 # Load the same Python module that was used to create the venv (written by setup_env.sh).
-if [[ ! -f "$VENV_DIR/hpc_python_module" ]]; then
-    echo "ERROR: $VENV_DIR not set up. Run: bash scripts/hpc/setup_env.sh" >&2
-    exit 1
-fi
 module load "$(cat "$VENV_DIR/hpc_python_module")"
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
@@ -63,9 +68,8 @@ export OMP_NUM_THREADS="${LSB_DJOB_NUMPROC:-8}"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 export PYTHONUNBUFFERED=1
 
-python -c "import torch; print('torch', torch.__version__, '| cuda available:', torch.cuda.is_available())"
-
+# --require-gpu: a GPU job must never silently fall back to CPU.
 # shellcheck disable=SC2086  # PARSE_ARGS is intentionally word-split
-python -m nordicpulse.ingestion.parse ${PARSE_ARGS:-}
+python -m nordicpulse.ingestion.parse --require-gpu ${PARSE_ARGS:-}
 
 echo "=== Finished at $(date '+%Y-%m-%d %H:%M:%S')"

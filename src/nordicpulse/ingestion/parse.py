@@ -92,19 +92,88 @@ def _write_atomic(path: Path, text: str) -> None:
 # --------------------------------------------------------------------------- device
 
 
-def detect_device() -> str:
-    """Return "cuda" if torch sees a GPU, else "cpu", and log what was found."""
+class GpuError(RuntimeError):
+    """The GPU cannot be used. Fatal: the run stops instead of failing report after report."""
+
+
+# Substrings of CUDA/driver failures meaning the GPU (or the torch build) is unusable,
+# e.g. "CUDA error: no kernel image is available for execution on the device".
+_CUDA_ERROR_MARKERS = ("cuda error", "no kernel image", "cudnn_status", "cublas_status",
+                       "cudaerror", "cuda driver", "device-side assert")
+
+
+def is_cuda_error(exc: BaseException | str) -> bool:
+    """True if an exception (or any exception in its chain) or message is a fatal CUDA error.
+
+    CUDA out-of-memory is NOT considered fatal: it depends on the document, not on
+    whether the GPU works.
+    """
+    if isinstance(exc, str):
+        msg = exc.lower()
+        return "out of memory" not in msg and any(m in msg for m in _CUDA_ERROR_MARKERS)
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, GpuError):
+            return True
+        name = type(current).__name__
+        if name == "OutOfMemoryError":
+            return False
+        if name in ("AcceleratorError", "CudaError") or is_cuda_error(str(current)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def gpu_smoke_test() -> None:
+    """Run tiny CUDA ops (a reduction and a cuDNN conv, like Docling's layout model).
+
+    Raises GpuError with the device capability and the torch arch list if they fail,
+    e.g. when the installed torch has no kernels for this GPU (sm_70 on a V100).
+    """
+    import torch
+
+    major, minor = torch.cuda.get_device_capability(0)
+    archs = torch.cuda.get_arch_list()
+    try:
+        assert torch.ones(10, device="cuda").sum().item() == 10
+        x = torch.randn(1, 3, 64, 64, device="cuda")
+        torch.nn.functional.conv2d(x, torch.randn(8, 3, 3, 3, device="cuda")).sum().item()
+        torch.cuda.synchronize()
+    except Exception as exc:
+        raise GpuError(
+            f"CUDA smoke test failed on {torch.cuda.get_device_name(0)} (sm_{major}{minor}); "
+            f"torch {torch.__version__} (CUDA {torch.version.cuda}) is compiled for {archs}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    log.info("GPU smoke test passed (sm_%d%d, torch compiled for %s)", major, minor, archs)
+
+
+def detect_device(require_gpu: bool = False) -> str:
+    """Return "cuda" if a working GPU is available, else "cpu", and log what was found.
+
+    Raises GpuError if a GPU is visible but unusable, or if require_gpu is set and
+    there is no GPU: a GPU batch job must not silently run on CPU.
+    """
     try:
         import torch
     except ImportError:
+        if require_gpu:
+            raise GpuError("torch is not importable and --require-gpu was given")
         log.warning("torch is not importable; Docling will run on CPU")
         return "cpu"
     if torch.cuda.is_available():
         log.info("CUDA available: %d device(s), using %s (torch %s, CUDA %s)",
                  torch.cuda.device_count(), torch.cuda.get_device_name(0),
                  torch.__version__, torch.version.cuda)
+        gpu_smoke_test()
+        log.info("device: cuda")
         return "cuda"
+    if require_gpu:
+        raise GpuError(f"CUDA NOT available (torch {torch.__version__}) and --require-gpu was given")
     log.warning("CUDA NOT available (torch %s); Docling will run on CPU", torch.__version__)
+    log.info("device: cpu")
     return "cpu"
 
 
@@ -154,8 +223,23 @@ def build_docling_converter(device: str) -> Any:
 
 
 def parse_docling(converter: Any, pdf: Path, md_path: Path, json_path: Path) -> tuple[int, int]:
-    """Convert a PDF with Docling, save Markdown + full JSON; return (n_pages, n_tables)."""
-    result = converter.convert(pdf)
+    """Convert a PDF with Docling, save Markdown + full JSON; return (n_pages, n_tables).
+
+    Docling records page-level failures in ``result.errors`` instead of raising. If any of
+    them is a CUDA error the GPU is unusable: raise GpuError (nothing is saved). Other
+    failures raise RuntimeError; a partial success is saved with a warning.
+    """
+    result = converter.convert(pdf, raises_on_error=False)
+    messages = [str(getattr(e, "error_message", e)) for e in (getattr(result, "errors", None) or [])]
+    cuda_msgs = [m for m in messages if is_cuda_error(m)]
+    if cuda_msgs:
+        raise GpuError(f"Docling reported {len(cuda_msgs)} CUDA error(s), first: {cuda_msgs[0]}")
+    status = getattr(getattr(result, "status", None), "name", "SUCCESS")
+    if status not in ("SUCCESS", "PARTIAL_SUCCESS"):
+        raise RuntimeError(f"Docling conversion {status}: {messages[:3]}")
+    if status == "PARTIAL_SUCCESS":
+        log.warning("%s: Docling PARTIAL_SUCCESS with %d error(s), first: %s", pdf.name,
+                    len(messages), messages[:1])
     doc = result.document
     # export_to_dict keeps provenance (page_no + bbox) for every text item and table.
     _write_atomic(md_path, doc.export_to_markdown())
@@ -217,7 +301,11 @@ def write_summary(results: list[ReportResult], previous: dict[str, dict[str, str
 
 
 def process_report(report_id: str, device: str, get_converter: Any) -> ReportResult:
-    """Run PyMuPDF and Docling on one report; errors are logged and reported as status=failed."""
+    """Run PyMuPDF and Docling on one report; errors are logged and reported as status=failed.
+
+    CUDA errors are re-raised as GpuError (after logging and marking the row failed)
+    so that the caller stops the whole run.
+    """
     row = ReportResult(id=report_id, device=device)
     pdf = RAW_DIR / f"{report_id}.pdf"
     if not pdf.exists():
@@ -246,14 +334,22 @@ def process_report(report_id: str, device: str, get_converter: Any) -> ReportRes
             log.warning("%s: page count mismatch PyMuPDF=%d Docling=%d", report_id,
                         row.n_pages, docling_pages)
         row.status = "ok"
-    except Exception:
-        log.exception("%s: FAILED", report_id)
+    except Exception as exc:
         row.status = "failed"
+        if is_cuda_error(exc):
+            log.error("%s: FAILED with a CUDA error: %s: %s", report_id, type(exc).__name__, exc)
+            raise GpuError(f"{report_id}: {exc}") from exc
+        log.exception("%s: FAILED", report_id)
     return row
 
 
-def run(ids: list[str] | None = None, force: bool = False) -> list[ReportResult]:
-    """Process the selected reports (all by default) and write the summary CSV."""
+def run(ids: list[str] | None = None, force: bool = False,
+        require_gpu: bool = False) -> list[ReportResult]:
+    """Process the selected reports (all by default) and write the summary CSV.
+
+    Raises GpuError if the GPU is unusable (before starting, or on a CUDA error while
+    converting a report); the summary is written first and remaining reports are skipped.
+    """
     all_ids = report_ids()
     selected = ids or all_ids
     unknown = sorted(set(selected) - set(all_ids))
@@ -265,7 +361,7 @@ def run(ids: list[str] | None = None, force: bool = False) -> list[ReportResult]
     log.info("Reports selected: %d, to process: %d, already done: %d%s",
              len(selected), len(todo), len(selected) - len(todo), " (--force)" if force else "")
 
-    device = detect_device() if todo else "n/a"
+    device = detect_device(require_gpu) if todo else "n/a"
     converter_cache: dict[str, Any] = {}
 
     def get_converter() -> Any:
@@ -282,7 +378,14 @@ def run(ids: list[str] | None = None, force: bool = False) -> list[ReportResult]
             log.info("%s: all outputs exist, skipping (use --force to redo)", rid)
             results.append(_row_from_outputs(rid, previous))
             continue
-        results.append(process_report(rid, device, get_converter))
+        try:
+            results.append(process_report(rid, device, get_converter))
+        except GpuError:
+            results.append(ReportResult(id=rid, device=device, status="failed"))
+            write_summary(results, previous, all_ids)
+            remaining = todo[todo.index(rid) + 1:]
+            log.error("Stopping: the GPU is unusable. Not processed: %s", remaining or "none")
+            raise
         # Rewrite the summary after every report so progress survives a killed job.
         write_summary(results, previous, all_ids)
 
@@ -302,12 +405,19 @@ def main() -> None:
                         help="report ids to process, e.g. vestas_2025 (default: all)")
     parser.add_argument("--force", action="store_true",
                         help="reprocess reports even if all outputs exist")
+    parser.add_argument("--require-gpu", action="store_true",
+                        help="abort instead of falling back to CPU if no working GPU")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%Y-%m-%d %H:%M:%S")
-    results = run(ids=args.ids, force=args.force)
+    try:
+        results = run(ids=args.ids, force=args.force, require_gpu=args.require_gpu)
+    except GpuError as exc:
+        log.critical("ABORTED, GPU unusable: %s", exc)
+        log.critical("Check the environment with scripts/hpc/check_gpu.sh (docs/hpc.md).")
+        sys.exit(1)
     if any(r.status in ("failed", "missing_pdf") for r in results):
         sys.exit(1)
 

@@ -1,0 +1,23 @@
+#!/bin/bash
+# Short LSF test job: run scripts/hpc/check_gpu.sh on a GPU node of a queue.
+#
+# Submit from the repository root:
+#     mkdir -p logs
+#     bsub < scripts/hpc/check_gpu.lsf                 # queue below
+#     bsub -q gpuv100 < scripts/hpc/check_gpu.lsf      # command-line -q overrides it
+# Result: logs/check_gpu_<jobid>.out (look for "check_gpu: PASSED").
+#
+#BSUB -J check_gpu
+# Same queue as parse_reports.lsf. GPU queues documented by DTU: gpuv100 (V100, sm_70)
+# and gpua100 (A100, sm_80), see https://www.hpc.dtu.dk/?page_id=2129. Confirm with `bqueues`.
+#BSUB -q gpua100
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "span[hosts=1]"
+#BSUB -R "rusage[mem=2GB]"
+#BSUB -W 0:10
+#BSUB -o logs/check_gpu_%J.out
+#BSUB -e logs/check_gpu_%J.err
+
+cd "${LS_SUBCWD:-$PWD}"
+bash scripts/hpc/check_gpu.sh
