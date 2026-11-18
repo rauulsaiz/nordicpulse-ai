@@ -7,8 +7,24 @@
 # It loads a Python module, creates a venv, installs this package in editable mode
 # with the parsing extras (docling, pymupdf + base deps pyyaml, requests, pypdf) and
 # pre-downloads the Docling models so the batch job does not depend on network access.
+#
+# Everything large (venv, pip cache, Hugging Face / torch model caches) goes to the DTU
+# scratch area $BLACKHOLE instead of the size-limited home directory. $BLACKHOLE is
+# TEMPORARY: it is wiped in maintenance windows (and at the end of January 2027), after
+# which this script simply has to be run again.
 
 set -eo pipefail  # no -u: environment-module shell functions may reference unset variables
+
+if [[ -z "$BLACKHOLE" || ! -d "$BLACKHOLE" ]]; then
+    echo "ERROR: \$BLACKHOLE is not set or does not exist (see /dtu/blackhole/readme.txt)." >&2
+    exit 1
+fi
+# Keep these cache paths identical to the ones exported in parse_reports.lsf, so the
+# job finds the models pre-downloaded here.
+export PIP_CACHE_DIR="$BLACKHOLE/.cache/pip"
+export HF_HOME="$BLACKHOLE/.cache/huggingface"
+export TORCH_HOME="$BLACKHOLE/.cache/torch"
+mkdir -p "$PIP_CACHE_DIR" "$HF_HOME" "$TORCH_HOME"
 
 # --------------------------------------------------------------------------------------
 # Python module to load (Python >= 3.11 is required by pyproject.toml).
@@ -21,8 +37,10 @@ set -eo pipefail  # no -u: environment-module shell functions may reference unse
 PYTHON_MODULE="${PYTHON_MODULE:-}"
 # --------------------------------------------------------------------------------------
 
-# Location of the virtual environment (override with: VENV_DIR=/path bash setup_env.sh).
-VENV_DIR="${VENV_DIR:-$PWD/.venv}"
+# Location of the virtual environment (override with: VENV_DIR=/path bash setup_env.sh;
+# parse_reports.lsf must then be given the same VENV_DIR).
+VENV_DIR="${VENV_DIR:-$BLACKHOLE/nordicpulse/.venv}"
+mkdir -p "$(dirname "$VENV_DIR")"
 
 if [[ -z "$PYTHON_MODULE" ]]; then
     # Terse listing (one module per line, printed on stderr); drop "(default)"-style tags.
@@ -78,3 +96,4 @@ fi
 
 echo
 echo "Done. Virtual environment: $VENV_DIR (module: $PYTHON_MODULE)"
+echo "      Model caches: $HF_HOME, $TORCH_HOME"

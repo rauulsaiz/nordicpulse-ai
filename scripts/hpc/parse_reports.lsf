@@ -30,11 +30,21 @@
 set -eo pipefail  # no -u: environment-module shell functions may reference unset variables
 
 cd "${LS_SUBCWD:-$PWD}"
-VENV_DIR="${VENV_DIR:-$PWD/.venv}"
+
+if [[ -z "$BLACKHOLE" || ! -d "$BLACKHOLE" ]]; then
+    echo "ERROR: \$BLACKHOLE is not set or does not exist (see /dtu/blackhole/readme.txt)." >&2
+    exit 1
+fi
+# Venv and model caches live in the DTU scratch area (same paths as setup_env.sh),
+# so the Docling / torch models do not fill the home directory.
+VENV_DIR="${VENV_DIR:-$BLACKHOLE/nordicpulse/.venv}"
+export HF_HOME="$BLACKHOLE/.cache/huggingface"
+export TORCH_HOME="$BLACKHOLE/.cache/torch"
 
 echo "=== Job ${LSB_JOBID:-?} on $(hostname) at $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=== Working directory: $PWD"
 echo "=== Cores: ${LSB_DJOB_NUMPROC:-?}"
+echo "=== Venv: $VENV_DIR | HF_HOME: $HF_HOME | TORCH_HOME: $TORCH_HOME"
 echo "=== nvidia-smi"
 nvidia-smi || echo "WARNING: nvidia-smi failed: no GPU visible to this job" >&2
 echo
