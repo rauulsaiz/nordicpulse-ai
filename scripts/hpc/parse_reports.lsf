@@ -1,0 +1,61 @@
+#!/bin/bash
+# LSF batch job: parse the annual reports with PyMuPDF + Docling on one GPU.
+#
+# Submit from the repository root (the logs/ directory must exist beforehand,
+# LSF does not create it):
+#     mkdir -p logs
+#     bsub < scripts/hpc/parse_reports.lsf
+#
+# Extra arguments for the parser can be passed through PARSE_ARGS, e.g.:
+#     PARSE_ARGS="--ids vestas_2025 --force" bsub < scripts/hpc/parse_reports.lsf
+#
+# ---------------------------------------------------------------- LSF options
+#BSUB -J parse_reports
+# TODO: check the GPU queue before submitting. gpuv100 (V100) and gpua100 (A100) are
+#       the GPU queues documented at https://www.hpc.dtu.dk/?page_id=2129. Confirm they
+#       exist and how busy they are with `bqueues` and `nodestat -G gpuv100`
+#       (or `nodestat -G gpua100`), and switch queue if one is much less loaded.
+#BSUB -q gpuv100
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 8
+#BSUB -R "span[hosts=1]"
+# Memory is requested PER CORE: 8 cores x 4 GB = 32 GB in total.
+#BSUB -R "rusage[mem=4GB]"
+#BSUB -M 5GB
+#BSUB -W 4:00
+#BSUB -o logs/parse_%J.out
+#BSUB -e logs/parse_%J.err
+# ----------------------------------------------------------------------------
+
+set -eo pipefail  # no -u: environment-module shell functions may reference unset variables
+
+cd "${LS_SUBCWD:-$PWD}"
+VENV_DIR="${VENV_DIR:-$PWD/.venv}"
+
+echo "=== Job ${LSB_JOBID:-?} on $(hostname) at $(date '+%Y-%m-%d %H:%M:%S')"
+echo "=== Working directory: $PWD"
+echo "=== Cores: ${LSB_DJOB_NUMPROC:-?}"
+echo "=== nvidia-smi"
+nvidia-smi || echo "WARNING: nvidia-smi failed: no GPU visible to this job" >&2
+echo
+
+# Load the same Python module that was used to create the venv (written by setup_env.sh).
+if [[ ! -f "$VENV_DIR/hpc_python_module" ]]; then
+    echo "ERROR: $VENV_DIR not set up. Run: bash scripts/hpc/setup_env.sh" >&2
+    exit 1
+fi
+module load "$(cat "$VENV_DIR/hpc_python_module")"
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+
+# Match CPU threads to the allocated cores.
+export OMP_NUM_THREADS="${LSB_DJOB_NUMPROC:-8}"
+export MKL_NUM_THREADS="$OMP_NUM_THREADS"
+export PYTHONUNBUFFERED=1
+
+python -c "import torch; print('torch', torch.__version__, '| cuda available:', torch.cuda.is_available())"
+
+# shellcheck disable=SC2086  # PARSE_ARGS is intentionally word-split
+python -m nordicpulse.ingestion.parse ${PARSE_ARGS:-}
+
+echo "=== Finished at $(date '+%Y-%m-%d %H:%M:%S')"
