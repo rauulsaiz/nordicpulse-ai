@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Project
+data/raw/*
+data/processed/*
+indexes/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!indexes/.gitkeep
+.env
+*.pdf
+logs/

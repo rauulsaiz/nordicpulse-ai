@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nordicpulse"
+version = "0.1.0"
+description = "Extract financial and ESG KPIs from Danish annual reports and answer comparative questions via MCP."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "pyyaml",
+    "pypdf[crypto]",  # AES-encrypted PDFs (e.g. Vestas) need cryptography
+    # TODO: uncomment when implementing
+    # "pydantic>=2",
+    # "docling",
+    # "pymupdf",
+    # "faiss-cpu",
+    # "rank-bm25",
+    # "numpy",
+    # "openai",
+    # "anthropic",
+    # "mcp",
+    # "python-dotenv",
+]
+
+[project.optional-dependencies]
+# PDF parsing (Docling pulls in torch; install on the GPU cluster, see docs/hpc.md)
+parsing = [
+    "docling",
+    "pymupdf",
+]
+dev = [
+    # TODO: "pytest", "ruff"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,19 @@
+companies:
+  - id: novo_nordisk
+    name: Novo Nordisk
+    reporting_currency: DKK   # verify 2025 presentation currency manually
+    reports:
+      2024: https://annualreport.novonordisk.com/2024/_assets/downloads/novo-nordisk-annual-report-2024.pdf?h=65BP4O4N
+      2025: https://annualreport.novonordisk.com/2025/_assets/downloads/novo-nordisk-annual-report-2025.pdf?h=9UdfHgQ-
+  - id: orsted
+    name: Ørsted
+    reporting_currency: DKK
+    reports:
+      2024: https://cdn.orsted.com/-/media/annual2024/orsted-annual-report-2024.pdf?rev=02bde37dc8424c8eb8e4e9f3b65cc833
+      2025: https://cdn.orsted.com/-/media/annual-2025/annual-report-2025.pdf?rev=34ff0f324dc1429bac1bc84382c30a9d
+  - id: vestas
+    name: Vestas
+    reporting_currency: EUR
+    reports:
+      2024: https://www.vestas.com/content/dam/vestas-com/global/en/investor/reports-and-presentations/financial/2024/fy-2024/Vestas%20Annual%20Report%202024.pdf.coredownload.inline.pdf
+      2025: https://www.vestas.com/content/dam/vestas-com/global/en/investor/reports-and-presentations/financial/2025/fy-2025/Vestas%20Annual%20Report%202025.pdf.coredownload.inline.pdf
